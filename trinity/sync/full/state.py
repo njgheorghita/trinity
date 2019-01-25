@@ -51,6 +51,7 @@ from trie.constants import (
     NODE_TYPE_BRANCH,
     NODE_TYPE_EXTENSION,
     NODE_TYPE_LEAF,
+    BLANK_NODE,
 )
 from trie.utils.nodes import (
     decode_node,
@@ -120,6 +121,8 @@ class StateDownloader(BaseService, PeerSubscriber):
         self._ready = asyncio.Event()
         self.scheduler = None
 
+        self.packet_count = 0
+
     # We are only interested in peers leaving the pool
     subscription_msg_types: FrozenSet[Type[Command]] = frozenset()
 
@@ -143,9 +146,9 @@ class StateDownloader(BaseService, PeerSubscriber):
         has_eligible_peers = False
         async for peer in self.peer_pool:
             peer = cast(ETHPeer, peer)
-            if self._peer_missing_nodes[peer].issuperset(node_keys):
-                self.logger.debug2("%s doesn't have any of the nodes we want, skipping it", peer)
-                continue
+#            if self._peer_missing_nodes[peer].issuperset(node_keys):
+#                self.logger.debug2("%s doesn't have any of the nodes we want, skipping it", peer)
+#                continue
             has_eligible_peers = True
             if peer in self.request_tracker.active_requests:
                 self.logger.debug2("%s is not idle, skipping it", peer)
@@ -191,7 +194,8 @@ class StateDownloader(BaseService, PeerSubscriber):
                 # TODO: disconnect a peer if the pool is full
                 return
 
-            candidates = list(not_yet_requested.difference(self._peer_missing_nodes[peer]))
+#           candidates = list(not_yet_requested.difference(self._peer_missing_nodes[peer]))
+            candidates = list(not_yet_requested)
             batch = tuple(candidates[:eth_constants.MAX_STATE_FETCH])
             not_yet_requested = not_yet_requested.difference(batch)
             self.request_tracker.active_requests[peer] = (time.time(), batch)
@@ -200,6 +204,9 @@ class StateDownloader(BaseService, PeerSubscriber):
     async def _request_and_process_nodes(self, peer: ETHPeer, batch: Tuple[Hash32, ...]) -> None:
         self.logger.debug("Requesting %d trie nodes from %s", len(batch), peer)
         try:
+            if any(item == b'' for item in batch):
+                self.logger.debug('Submitting batch with empty item')
+            self.packet_count += 1
             node_data = await peer.requests.get_node_data(batch)
         except TimeoutError as err:
             self.logger.debug(
@@ -268,15 +275,31 @@ class StateDownloader(BaseService, PeerSubscriber):
     async def _monitor_new_blocks(self) -> None:
         monitor = ETHVerifiedTipMonitor(self.peer_pool, self.cancel_token)
         self.run_daemon(monitor)
+        first_root, second_root = None, None
         async for (peer, header) in monitor.wait_tip_info():
-            # TOOD: a global variable like this is likely bad form
-            self.root_hash = header.state_root
-            self.logger.debug('telling sync to use %s from %s', encode_hex(self.root_hash), peer)
-            if self.scheduler:
-                # TODO: this logic is a little hard to follow. is there a way to get rid
-                # of the conditional?
-                self.scheduler.new_root_hash(self.root_hash)
-            self._ready.set()  # tell _run to start running if it isn't already
+            root_hash = header.state_root
+
+            if not first_root:
+                first_root = root_hash
+            else:
+                second_root = root_hash
+                break
+
+        self.logger.debug(
+            'diffing trees rooted at %s and %s',
+            encode_hex(first_root), encode_hex(second_root)
+        )
+
+        # Allow the LevelDB instance to consume half of the entire file descriptor limit that
+        # the OS permits. Let the other half be reserved for other db access, networking etc.
+        max_open_files = get_open_fd_limit() // 2
+        self.scheduler = TreeDiffStateSync(
+            first_root, second_root,
+            LevelDB(Path(self._nodes_cache_dir.name), max_open_files),
+            self.logger,
+        )
+
+        self._ready.set()  # we can start syncing!
 
     async def _run(self) -> None:
         """Fetch all trie nodes starting from self.root_hash, and store them in self.db.
@@ -284,22 +307,9 @@ class StateDownloader(BaseService, PeerSubscriber):
         Raises OperationCancelled if we're interrupted before that is completed.
         """
         self.logger.info("Waiting for a client to connect")
-        self.run_daemon_task(self._monitor_new_blocks())
+        self.run_task(self._monitor_new_blocks())
 
         await self.wait(self._ready.wait())
-
-        # Allow the LevelDB instance to consume half of the entire file descriptor limit that
-        # the OS permits. Let the other half be reserved for other db access, networking etc.
-        max_open_files = get_open_fd_limit() // 2
-        self.scheduler = SingleAddressStateSync(
-            self.root_hash,
-            self._account_db,
-            LevelDB(Path(self._nodes_cache_dir.name), max_open_files),
-            self.logger,
-            self.get_event_loop(),
-        )
-
-        self.logger.info("Starting state sync for root hash %s", encode_hex(self.root_hash))
 
         self._timer.start()
         self.run_task(self._periodically_report_progress())
@@ -324,7 +334,13 @@ class StateDownloader(BaseService, PeerSubscriber):
                 await self.request_nodes(requests)
                 # await self.request_nodes([request.node_key for request in requests])
 
-        self.logger.info("Finished state sync with root hash %s", encode_hex(self.root_hash))
+        self.logger.info(
+            "Finished tree diff changed: %s unsure: %s elapsed: %s reqs: %s",
+            self.scheduler.different_node_count,
+            self.scheduler.unsure_node_count,
+            self._timer.elapsed,
+            self.packet_count,
+        )
 
     async def _periodically_report_progress(self) -> None:
         while self.is_operational:
@@ -332,10 +348,12 @@ class StateDownloader(BaseService, PeerSubscriber):
                 len(node_keys) for _, node_keys in self.request_tracker.active_requests.values())
             msg = "processed=%d  " % self._total_processed_nodes
             msg += "tnps=%d  " % (self._total_processed_nodes / self._timer.elapsed)
-            msg += "committed=%d  " % self.scheduler.committed_nodes
             msg += "active_requests=%d  " % requested_nodes
             msg += "queued=%d  " % len(self.scheduler.queue)
-            msg += "pending=%d  " % len(self.scheduler.requests)
+            msg += "fetched=%d  " % len(self.scheduler.fetched_requests)
+            msg += "different=%d  " % self.scheduler.different_node_count
+            msg += "unsure=%d  " % self.scheduler.unsure_node_count
+            msg += "pending=%d  " % len(self.scheduler.node_to_request)
             msg += "missing=%d  " % len(self.request_tracker.missing)
             msg += "timeouts=%d" % self._total_timeouts
             self.logger.info("State-Sync: %s", msg)
@@ -496,6 +514,315 @@ class SingleAddressStateSync:
         data = await future
         node = decode_node(data)
         return node
+
+
+class DiffTraverse:
+    def __init__(self, depth, left, right):
+        self.depth = depth
+        self.keys = [left, right]
+        self.fetched = [False, False]
+        self.data = [None, None]
+
+    @property
+    def ready(self):
+        return self.fetched[0] and self.fetched[1]
+
+    def fetch(self, key, data):
+        try:
+            index = self.keys.index(key)
+        except ValueError:
+            # broken invariant
+            raise
+        self.fetched[index] = True
+        self.data[index] = data
+
+
+class NormalTraverse:
+    def __init__(self, depth, key: Hash32, unsure: bool = False):
+        self.depth = depth
+        self.key = key
+        self.data = None
+        self.unsure = unsure
+
+    @property
+    def ready(self):
+        return self.data is not None
+
+    def fetch(self, key, data):
+        assert key == self.key
+        self.data = data
+
+
+class SearchTraverse:
+    # An idea for correctly dealing with compare_extension_branch:
+    # 2. You could start a SearchTraverse. The branch is traversed and all paths it
+    # leads to spawn NormalTraverse's except for the one which leads to the previous
+    # extension's target, that one continues to be a SearchTraverse. Once you've found
+    # the target node you continue with a DiffTraverse.
+    # - SearchTraverse is also careful not to skip past the target node. If it does
+    # then that node no longer exists and we can continue with a NormalTraverse.
+    pass
+
+
+class TreeDiffStateSync:
+    "Given two tree roots, fetches and counts the number of changed nodes"
+    def __init__(self, left_root: Hash32, right_root: Hash32,
+                 nodes_cache: BaseDB, logger: ExtendedDebugLogger) -> None:
+        self.finished = False
+        self.nodes_cache = nodes_cache
+        self.logger = logger
+
+        self.node_to_request: Dict[Hash32, Union[NormalTraverse, DiffTraverse]] = dict()
+        self.fetched_requests = collections.deque()
+        self.queue = list()
+
+        self.different_node_count = 0
+        self.unsure_node_count = 0
+        self.schedule_diff(0, left_root, right_root)
+
+    @property
+    def has_pending_requests(self) -> bool:
+        if self.finished:
+            return False
+        return len(self.queue) or len(self.fetched_requests) or len(self.node_to_request)
+
+    def next_batch(self, n: int = 1) -> List[SyncRequest]:
+        # StateDownloader is asking for the next few nodes it should request
+        if self.finished:
+            return None
+
+        while len(self.queue) < n and len(self.fetched_requests) and not self.finished:
+            # process received nodes until we can fill a request
+            req = self.fetched_requests.popleft()
+            if isinstance(req, DiffTraverse):
+                self.handle_diff_traverse(req)
+            elif isinstance(req, NormalTraverse):
+                self.handle_normal_traverse(req)
+            else:
+                assert False
+
+        if len(self.queue):
+            self.logger.info(
+                "returning more nodes. diff: %s unsure: %s",
+                self.different_node_count, self.unsure_node_count
+            )
+
+        result = self.queue[:n]
+        self.queue = self.queue[n:]
+        return result
+    
+    async def process(self, results: List[Tuple[Hash32, bytes]]) -> None:
+        # StateDownloader received some nodes, handle them!
+        for node_key, data in results:
+            node = decode_node(data)
+            request = self.node_to_request.pop(node_key)
+            request.fetch(node_key, node)
+            if request.ready:
+                self.fetched_requests.append(request)
+
+    def schedule_diff(self, depth, left: Hash32, right: Hash32) -> None:
+        self.different_node_count += 1
+
+        if BLANK_ROOT_HASH in (left, right):
+            # this is typically an empty state root
+            self.logger.error(
+                'found BLANK_HASH in one branch and a node in the other at depth %s', depth
+            )
+            self.schedule_normal_traverse(
+                depth, [item for item in (left, right) if item is not BLANK_ROOT_HASH]
+            )
+            return
+        if BLANK_NODE in (left, right):
+            # this is typically an empty child of a branch
+            self.logger.debug(
+                '(depth %s) found BLANK_NODE', depth
+            )
+            self.schedule_normal_traverse(
+                depth, [item for item in (left, right) if item is not BLANK_NODE]
+            )
+            return
+
+        request = DiffTraverse(depth, left, right)
+        self.node_to_request[left] = request
+        self.node_to_request[right] = request
+        if b'' in (left, right):
+            assert False
+        self.queue.extend([left, right])
+
+    def schedule_normal_traverse(self, depth, 
+                                 children: List[Hash32],
+                                 unsure: bool = False) -> None:
+        for child in children:
+            if child == BLANK_ROOT_HASH:
+                continue
+            if child == BLANK_NODE:
+                continue
+            if unsure:
+                self.unsure_node_count += 1
+            else:
+                self.different_node_count += 1
+            traverse = NormalTraverse(depth, child, unsure=unsure)
+            self.node_to_request[child] = traverse
+            self.queue.append(child)
+
+    def schedule_normal_traverse_leaf(self, depth, leaf, unsure: bool = False) -> None:
+        account = rlp.decode(leaf[1], sedes=Account)
+        if account.code_hash != EMPTY_SHA3:
+            # this is a node a state syncer would need to fetch
+            if unsure:
+                self.unsure_node_count += 1
+            else:
+                self.different_node_count += 1
+        if account.storage_root != BLANK_ROOT_HASH:
+            self.logger.debug(
+                "(depth %s) traversing into a storage root", depth
+            )
+            self.schedule_normal_traverse(
+                depth, [account.storage_root], unsure,
+            )
+
+    def handle_normal_traverse(self, traverse: NormalTraverse):
+        node = traverse.data
+        node_type = get_node_type(node)
+
+        if node_type == NODE_TYPE_BRANCH:
+            self.schedule_normal_traverse(
+                traverse.depth + 1, node[:16], traverse.unsure
+            )
+        elif node_type == NODE_TYPE_LEAF:
+            # there are two possibilities. Either we're a leaf in the state trie or we're
+            # a leaf in the account's state trie. Add 64 to signal to ourselves that we've
+            # entered an account's state trie
+            if traverse.depth < 64:
+                self.schedule_normal_traverse_leaf(
+                    traverse.depth + 64, node, traverse.unsure
+                )
+        elif node_type == NODE_TYPE_EXTENSION:
+            self.schedule_normal_traverse(
+                traverse.depth + 1, [node[1]], traverse.unsure
+            )
+        else:
+            self.logger.error("Unknown node type %s", node_type)
+            self.logger.debug("Node: %s", node)
+            self.finished = True
+
+    def handle_diff_traverse(self, request: DiffTraverse):
+        # once a request has come back we get to look at the two nodes!
+        left_node, right_node = request.data
+        left_type, right_type = map(get_node_type, request.data)
+
+        # TODO: using the same method for both isn't correct, we care about the
+        # number of new nodes and this erases information about which is new
+        if left_type == NODE_TYPE_BRANCH and right_type == NODE_TYPE_BRANCH:
+            self.compare_branches(request.depth, left_node, right_node)
+
+        elif left_type == NODE_TYPE_LEAF and right_type == NODE_TYPE_LEAF:
+            self.compare_leaves(request.depth, left_node, right_node)
+
+        elif right_type == NODE_TYPE_EXTENSION and left_type == NODE_TYPE_EXTENSION:
+            self.compare_extensions(request.depth, left_node, right_node)
+
+        elif left_type == NODE_TYPE_BRANCH and right_type == NODE_TYPE_LEAF:
+            self.compare_leaf_branch(request.depth, right_node, left_node)
+        elif right_type == NODE_TYPE_BRANCH and left_type == NODE_TYPE_LEAF:
+            self.compare_leaf_branch(request.depth, left_node, right_node)
+
+        elif left_type == NODE_TYPE_EXTENSION and right_type == NODE_TYPE_BRANCH:
+            self.compare_extension_branch(request.depth, left_node, right_node)
+        elif left_type == NODE_TYPE_BRANCH and right_type == NODE_TYPE_EXTENSION:
+            self.compare_extension_branch(request.depth, right_node, left_node)
+
+        elif left_type == NODE_TYPE_EXTENSION and right_type == NODE_TYPE_LEAF:
+            self.compare_extension_leaf(request.depth, left_node, right_node)
+        elif left_type == NODE_TYPE_LEAF and right_type == NODE_TYPE_EXTENSION:
+            self.compare_extension_leaf(request.depth, right_node, left_node)
+        else:
+            self.logger.debug(
+                "(depth %s) Don't know how to handle node type (%s, %s)",
+                request.depth, left_type, right_type
+            )
+            self.logger.debug("Left: %s", left_node)
+            self.logger.debug("Right: %s", right_node)
+            self.finished = True
+
+    def format_branch(self, node):
+        return [encode_hex(child[:6]) for child in node]
+
+    def compare_leaf_branch(self, depth, leaf, branch):
+        # where there was previously just one account there are now many
+        # TODO: We care about the number of new nodes and this (over)counts how
+        # many nodes belong to one tree but not the intersection of both.
+
+        # these two nodes have already been counted as different by compare_branches but
+        # we should also count the number of nodes in each
+        if depth < 64:
+            self.logger.debug("(depth %s) Reached leaf-branch, traversing into both", depth)
+            self.schedule_normal_traverse(depth + 1, children=branch[:16], unsure=True)
+            self.schedule_normal_traverse_leaf(depth + 64, leaf, unsure=True)
+        else:
+            # we've reached the bottom of the state tree!
+            self.logger.debug("(depth %s) Reached state leaf-branch, traversing the branch", depth)
+            self.schedule_normal_traverse(depth + 1, children=branch[:16])
+
+    def compare_leaves(self, depth, left, right):
+        if depth >= 64:
+            # we've reached bottom of the state tree! No need to count any further
+            return
+
+        left_acct = rlp.decode(left[1], sedes=Account)
+        right_acct = rlp.decode(right[1], sedes=Account)
+
+        if left_acct.storage_root != right_acct.storage_root:
+            self.logger.debug("(depth %s) leaf-leaf storage root changed", depth)
+            self.schedule_diff(depth + 64, left_acct.storage_root, right_acct.storage_root)
+        # I think the code-hash is immutable, so we needn't consider it here?
+
+    def compare_branches(self, depth, left, right):
+        for (lchild, rchild) in zip(left[:16], right[:16]):
+            if lchild != rchild:
+                self.schedule_diff(depth + 1, lchild, rchild)
+
+    def compare_extensions(self, depth, left, right):
+        self.logger.error(
+            "(depth %s) two extensions", depth
+        )
+        if left[0] == right[0]:
+            # the easy case, they both point to the same (changed) node
+            self.schedule_diff(depth + 1, left[1], right[1])
+            return
+
+        # the rest of the cases are tricky to handle. a node has been added/removed
+        # somewhere along the line. Just count the number of nodes in both
+        self.schedule_normal_traverse(depth + 1, [left[1]], unsure=True)
+        self.schedule_normal_traverse(depth + 1, [right[1]], unsure=True)
+
+    def compare_extension_branch(self, depth, extension, branch):
+        # the proper solution would involve remembering the extension's path and trying to
+        # link it up with a node found inside branch. All other nodes count as changes.
+
+        # For now count all nodes inside either as having been changed. Pass "unsure"
+        # because this will usually overcount the number of changed nodes, this count will
+        # be reported separately.
+        self.logger.error(
+            "(depth %s) extension-branch. following both", depth
+        )
+        self.schedule_normal_traverse(depth + 1, branch[:16], unsure=True)
+        self.schedule_normal_traverse(depth + 1, [extension[1]], unsure=True)
+
+    def compare_extension_leaf(self, depth, extension, leaf):
+        # we used to have an extension and now we have a leaf:
+        # - there were multiple nodes and all but one was deleted
+        # we used to have a leaf and now we have an extension
+        # - there was an account but now there are more
+
+        if depth < 64:
+            self.logger.error("(depth %s) extension-leaf. following both", depth)
+            self.schedule_normal_traverse(depth + 1, children=[extension[1]], unsure=True)
+            self.schedule_normal_traverse_leaf(depth + 64, leaf, unsure=True)
+        else:
+            self.logger.error("(depth %s) state extension-leaf. following the extension", depth)
+            self.schedule_normal_traverse(depth + 1, children=[extension[1]])
+
 
 
 def _test() -> None:
