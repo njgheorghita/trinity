@@ -342,6 +342,14 @@ class StateDownloader(BaseService, PeerSubscriber):
             self.packet_count,
         )
 
+        depths = sorted(
+            self.scheduler.diff_count_by_depth.items(),
+            key=lambda item: item[0],
+        )
+
+        for depth, count in depths:
+            self.logger.info(f"{depth:04}: {count}")
+
     async def _periodically_report_progress(self) -> None:
         while self.is_operational:
             requested_nodes = sum(
@@ -578,6 +586,8 @@ class TreeDiffStateSync:
 
         self.different_node_count = 0
         self.unsure_node_count = 0
+        self.diff_count_by_depth = collections.defaultdict(int)
+
         self.schedule_diff(0, left_root, right_root)
 
     @property
@@ -622,6 +632,7 @@ class TreeDiffStateSync:
 
     def schedule_diff(self, depth, left: Hash32, right: Hash32) -> None:
         self.different_node_count += 1
+        self.diff_count_by_depth[depth] += 1
 
         if BLANK_ROOT_HASH in (left, right):
             # this is typically an empty state root
@@ -661,6 +672,7 @@ class TreeDiffStateSync:
                 self.unsure_node_count += 1
             else:
                 self.different_node_count += 1
+                self.diff_count_by_depth[depth] += 1
             traverse = NormalTraverse(depth, child, unsure=unsure)
             self.node_to_request[child] = traverse
             self.queue.append(child)
@@ -673,6 +685,7 @@ class TreeDiffStateSync:
                 self.unsure_node_count += 1
             else:
                 self.different_node_count += 1
+                self.diff_count_by_depth[depth] += 1
         if account.storage_root != BLANK_ROOT_HASH:
             self.logger.debug(
                 "(depth %s) traversing into a storage root", depth
