@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import os
 from setuptools import setup, find_packages
 
 
@@ -92,6 +93,13 @@ deps['dev'] = (
 
 
 install_requires = deps['trinity'] + deps['p2p'] + deps['eth2']
+
+if os.environ.get('READTHEDOCS', False):
+    # in readthedocs environment, install some relevant c libraries
+    import subprocess
+    print("Installing snappy C library for the ReadTheDocs build...")
+    subprocess.run(['apt-get', 'install', 'libsnappy-dev'], check=True)
+    print("Finished installing snappy C library")
 
 setup(
     name='trinity',
