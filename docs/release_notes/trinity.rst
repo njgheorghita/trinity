@@ -4,7 +4,7 @@ Trinity
 Unreleased (latest source)
 --------------------------
 
-- `#485 <https://github.com/ethereum/trinity/pull/485>`_: Bugfix: Ensure Trinity shuts down if Discovery crashs unexpectedly
+- `#485 <https://github.com/ethereum/trinity/pull/485>`_: Bugfix: Ensure Trinity shuts down if Discovery crashes unexpectedly
 - `#441 <https://github.com/ethereum/trinity/pull/441>`_: Feauture: Run with any custom network ID, as long as you specify a genesis file
 - `#436 <https://github.com/ethereum/trinity/pull/436>`_: Feauture: Connect to preferred nodes even when discovery is disabled
 - `#400 <https://github.com/ethereum/trinity/pull/400>`_: Bugfix: Respect configuration of individual logger (e.g -l p2p.discovery=ERROR)
