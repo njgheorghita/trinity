@@ -26,8 +26,8 @@ class BaseMetricsService(Service, MetricsServiceAPI):
         self._registry = HostMetricsRegistry(host)
         self._reporter = InfluxReporter(
             registry=self._registry,
-            protocol='https',
-            port=443,
+            protocol='http',
+            port=4046,
             database=influx_database,
             username=influx_user,
             password=influx_password,
