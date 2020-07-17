@@ -16,6 +16,7 @@ from trinity.components.builtin.metrics.service.trio import TrioMetricsService
 from trinity.components.builtin.metrics.blockchain_metrics_collector import (
     collect_blockchain_metrics,
 )
+from trinity.components.builtin.metrics.protocol_metrics_collector import collect_protocol_metrics
 from trinity.components.builtin.metrics.system_metrics_collector import collect_process_metrics
 
 from trinity.extensibility import (
@@ -141,6 +142,13 @@ class MetricsComponent(TrioIsolatedComponent):
     async def do_run(self, event_bus: EndpointAPI) -> None:
         boot_info = self._boot_info
         metrics_service = metrics_service_from_args(boot_info.args)
+        
+        protocol_metrics_collector = collect_protocol_metrics(
+            boot_info,
+            event_bus,
+            metrics_service,
+            frequency_seconds=boot_info.args.metrics_system_collector_frequency,  # change frequency?
+        )
 
         # types ignored due to https://github.com/ethereum/async-service/issues/5
         system_metrics_collector = collect_process_metrics(  # type: ignore
@@ -160,4 +168,5 @@ class MetricsComponent(TrioIsolatedComponent):
             metrics_service,
             system_metrics_collector,
             blockchain_metrics_collector,
+            # protocol_metrics_collector,
         ])
