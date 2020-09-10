@@ -1,5 +1,11 @@
+import time
+import base64
 from typing import Dict, Generic
 from pyformance import MetricsRegistry
+from pyformance.reporters import InfluxReporter
+
+import requests
+from lahja import BaseEvent, EndpointAPI
 
 from p2p.abc import TPeer
 from p2p.exceptions import PeerReporterRegistryError
@@ -60,3 +66,65 @@ class PeerReporterRegistry(Generic[TPeer]):
     def make_periodic_update(self, peer: TPeer, peer_id: int) -> None:
         # subclasses are responsible for implementing method that updates all implemented meters
         pass
+
+
+class PivotEvent(BaseEvent):
+    def __init__(self, payload):
+        super().__init__()
+        self.payload = payload
+
+
+class SyncMetricsRegistry:
+    """
+    Track pivot rate and create annotations for influxdb.
+    """
+    def __init__(self,
+                 metrics_registry: MetricsRegistry,
+                 metrics_reporter: InfluxReporter,
+                 event_bus: EndpointAPI
+                 ) -> None:
+        self.protocol = metrics_reporter.protocol
+        self.server = metrics_reporter.server
+        self.port = metrics_reporter.port
+        self.database = metrics_reporter.database
+        self.username = metrics_reporter.username
+        self.password = metrics_reporter.password
+        self.host = metrics_registry.host
+        self.event_bus = event_bus
+        self.event_bus.subscribe(PivotEvent, lambda event: self.record_pivot(event.payload))
+        self.pivot_gauge = metrics_registry.gauge('trinity.p2p/sync/pivot_rate.gauge')
+        self.pivot_gauge.set_value(0)
+        self.pivot_timestamps = []
+
+    def trigger_sync_reports(self) -> None:
+        # update influxdb pivots/hour gauge
+        pivots_over_last_hour = self.get_pivots_over_last_hour()
+        self.pivot_gauge.set_value(pivots_over_last_hour)
+
+    def record_pivot(self, block_number: int) -> None:
+        # record pivot and send event annotation to influxdb
+        current_time = int(time.time())
+        self.pivot_timestamps.append(current_time)
+        self._post_pivot_annotations(current_time, block_number)
+        pivots_over_last_hour = self.get_pivots_over_last_hour(current_time)
+        self.pivot_gauge.set_value(pivots_over_last_hour)
+
+    def get_pivots_over_last_hour(self, current_time=None):
+        if not current_time:
+            current_time = int(time.time())
+        return len([stamp for stamp in self.pivot_timestamps if stamp > current_time - 3600])
+
+    def _post_pivot_annotations(self, pivot_time: int, block_number: int) -> None:
+        path = f"/write?db={self.database}&precision=s"
+        url = f"{self.protocol}://{self.server}:{self.port}{path}"
+        auth_header = self._generate_auth_header()
+        post_data = (
+            f'events title="beam pivot @ block {block_number}",'
+            f'text="pivot event",tags="{self.host}" {pivot_time}'
+        )
+        requests.post(url, data=post_data, headers=auth_header)
+
+    def _generate_auth_header(self) -> Dict[str, str]:
+        auth_string = ("%s:%s" % (self.username, self.password)).encode()
+        auth = base64.b64encode(auth_string)
+        return {"Authorization": "Basic %s" % auth.decode("utf-8")}

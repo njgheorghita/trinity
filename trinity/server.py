@@ -28,6 +28,7 @@ from p2p.handshake import receive_dial_in, DevP2PHandshakeParams
 
 from trinity._utils.version import construct_trinity_client_identifier
 from trinity.chains.base import AsyncChainAPI
+from trinity.components.builtin.metrics.abc import MetricsServiceAPI
 from trinity.db.eth1.chain import BaseAsyncChainDB
 from trinity.db.eth1.header import BaseAsyncHeaderDB
 from trinity.protocol.common.context import ChainContext
@@ -66,12 +67,13 @@ class BaseServer(Service, Generic[TPeerPool]):
                  network_id: int,
                  max_peers: int = DEFAULT_MAX_PEERS,
                  event_bus: EndpointAPI = None,
-                 metrics_registry: MetricsRegistry = None,
+                 metrics_service: MetricsServiceAPI = None,
                  ) -> None:
         self.logger = get_logger(self.__module__ + '.' + self.__class__.__name__)
         # cross process event bus
         self.event_bus = event_bus
-        self.metrics_registry = metrics_registry
+        self.metrics_registry = metrics_service.registry
+        self.metrics_reporter = metrics_service.reporter
 
         # setup parameters for the base devp2p handshake.
         self.p2p_handshake_params = DevP2PHandshakeParams(
@@ -179,6 +181,7 @@ class FullServer(BaseServer[ETHPeerPool]):
             max_peers=self.max_peers,
             event_bus=self.event_bus,
             metrics_registry=self.metrics_registry,
+            metrics_reporter=self.metrics_reporter,
         )
 
 

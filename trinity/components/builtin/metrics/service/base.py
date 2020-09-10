@@ -52,6 +52,13 @@ class BaseMetricsService(Service, MetricsServiceAPI):
         """
         return self._registry
 
+    @property
+    def reporter(self) -> InfluxReporter:
+        """
+        Return the :class:`pyformance.reporters.InfluxReporter` with influxdb connection details.
+        """
+        return self._reporter
+
     async def run(self) -> None:
         self.logger.info("Reporting metrics to %s", self._influx_server)
         self.manager.run_daemon_task(self.continuously_report)

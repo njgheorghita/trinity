@@ -96,7 +96,7 @@ class LightNode(Node[LESPeer]):
                 network_id=self._network_id,
                 max_peers=self._max_peers,
                 event_bus=self.event_bus,
-                metrics_registry=self.metrics_service.registry,
+                metrics_service=self.metrics_service,
             )
         return self._p2p_server
 

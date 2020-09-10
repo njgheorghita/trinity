@@ -1,11 +1,12 @@
 import asyncio
 
 from async_service import Service
-from lahja import EndpointAPI
+from lahja import BroadcastConfig, EndpointAPI
 
 from eth_typing import BlockNumber
 
 from eth.abc import AtomicDatabaseAPI
+from p2p.metrics import PivotEvent
 
 from trinity.chains.base import AsyncChainAPI
 from trinity.db.eth1.chain import BaseAsyncChainDB
@@ -72,6 +73,8 @@ class BeamSyncService(Service):
             do_pivot = await self._monitor_for_pivot(beam_syncer)
             if do_pivot:
                 self.logger.info("Pivoting Beam Sync to a newer header...")
+                latest_block_number = beam_syncer._body_syncer._latest_block_number
+                await self.event_bus.broadcast(PivotEvent(latest_block_number), BroadcastConfig(internal=True))
             else:
                 self.logger.info("No pivot requested. Leaving Beam Syncer closed...")
                 break

@@ -1,4 +1,5 @@
 from async_service import Service
+from pyformance.reporters import InfluxReporter
 
 from trinity.components.builtin.metrics.abc import MetricsServiceAPI
 from trinity.components.builtin.metrics.registry import NoopMetricsRegistry
@@ -23,6 +24,7 @@ class NoopMetricsService(Service, MetricsServiceAPI):
                  reporting_frequency: int = 10):
 
         self._registry = NoopMetricsRegistry()
+        self._reporter = InfluxReporter()
 
     @property
     def registry(self) -> NoopMetricsRegistry:
@@ -31,6 +33,14 @@ class NoopMetricsService(Service, MetricsServiceAPI):
         metrics instruments can be registered and retrieved.
         """
         return self._registry
+
+    @property
+    def reporter(self) -> InfluxReporter:
+        """
+        Return the :class:`pyformance.reporters.InfluxReporter` with dummy
+        influxdb connection details.
+        """
+        return self._reporter
 
     async def run(self) -> None:
         self.logger.info("Running NoopMetricsService")
