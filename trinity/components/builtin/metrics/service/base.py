@@ -1,13 +1,34 @@
 import time
+from typing import Dict
+import requests
+import base64
 from abc import abstractmethod
 from http.client import HTTPException
 
 from async_service import Service
-from pyformance.reporters import InfluxReporter
+from pyformance.reporters.influx import InfluxReporter
+from lahja import EndpointAPI
 
 from trinity.components.builtin.metrics.abc import MetricsServiceAPI
 from trinity.components.builtin.metrics.registry import HostMetricsRegistry
+from trinity.components.builtin.metrics.sync_metrics_registry import SyncMetricsRegistry
 from trinity._utils.logging import get_logger
+
+
+class ExtendedInfluxReporter(InfluxReporter):
+    """
+    `InfluxReporter` extended to enable sending annotations to InfluxDB
+    """
+    def send_annotation(self, annotation_data: str) -> None:
+        path = f"/write?db={self.database}&precision=s"
+        url = f"{self.protocol}://{self.server}:{self.port}{path}"
+        auth_header = self._generate_auth_header()
+        requests.post(url, data=annotation_data, headers=auth_header)
+
+    def _generate_auth_header(self) -> Dict[str, str]:
+        auth_string = ("%s:%s" % (self.username, self.password)).encode()
+        auth = base64.b64encode(auth_string)
+        return {"Authorization": "Basic %s" % auth.decode("utf-8")}
 
 
 class BaseMetricsService(Service, MetricsServiceAPI):
@@ -32,17 +53,18 @@ class BaseMetricsService(Service, MetricsServiceAPI):
         self._influx_server = influx_server
         self._reporting_frequency = reporting_frequency
         self._registry = HostMetricsRegistry(host)
-        self._reporter = InfluxReporter(
+        self._reporter = ExtendedInfluxReporter(
             registry=self._registry,
             database=influx_database,
             username=influx_user,
             password=influx_password,
             protocol=protocol,
             port=port,
-            server=influx_server
+            server=influx_server,
         )
 
     logger = get_logger('trinity.components.builtin.metrics.MetricsService')
+    sync_metrics_registry = None
 
     @property
     def registry(self) -> HostMetricsRegistry:
@@ -53,11 +75,19 @@ class BaseMetricsService(Service, MetricsServiceAPI):
         return self._registry
 
     @property
-    def reporter(self) -> InfluxReporter:
+    def reporter(self) -> ExtendedInfluxReporter:
         """
-        Return the :class:`pyformance.reporters.InfluxReporter` with influxdb connection details.
+        Return the :class:`trinity.components.builtin.metrics.service.base.ExtendedInfluxReporter`
+        with influxdb connection details and annotations supported.
         """
         return self._reporter
+
+    def subscribe_to_pivot_events(self, event_bus: EndpointAPI) -> None:
+        """
+        Subscribe to beam sync pivot events triggered by the syncing service.
+        """
+        self.sync_metrics_registry = SyncMetricsRegistry(self.registry, self.reporter, event_bus)
+        self.sync_metrics_registry.subscribe_to_pivot_events()
 
     async def run(self) -> None:
         self.logger.info("Reporting metrics to %s", self._influx_server)

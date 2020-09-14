@@ -215,7 +215,8 @@ class BeamSyncStrategy(BaseSyncStrategy):
             event_bus,
             args.sync_from_checkpoint,
             args.force_beam_block_number,
-            not args.disable_backfill
+            not args.disable_backfill,
+            args.enable_metrics,
         )
 
         async with background_asyncio_service(syncer) as manager:
@@ -358,6 +359,7 @@ class SyncerComponent(AsyncioIsolatedComponent):
 
         if boot_info.args.enable_metrics:
             metrics_service = metrics_service_from_args(boot_info.args, AsyncioMetricsService)
+            metrics_service.subscribe_to_pivot_events(event_bus)
         else:
             # Use a NoopMetricsService so that no code branches need to be taken if metrics
             # are disabled

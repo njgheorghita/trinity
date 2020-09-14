@@ -34,7 +34,6 @@ from lahja import (
     EndpointAPI,
 )
 from pyformance import MetricsRegistry
-from pyformance.reporters import InfluxReporter
 
 from p2p.abc import NodeAPI, SessionAPI
 from p2p.asyncio_utils import create_task
@@ -58,7 +57,7 @@ from p2p.exceptions import (
     UnknownAPI,
     UnreachablePeer,
 )
-from p2p.metrics import SyncMetricsRegistry, PeerReporterRegistry
+from p2p.metrics import PeerReporterRegistry
 from p2p.peer import (
     BasePeer,
     BasePeerFactory,
@@ -121,7 +120,6 @@ class BasePeerPool(Service, AsyncIterable[BasePeer]):
                  max_peers: int = DEFAULT_MAX_PEERS,
                  event_bus: EndpointAPI = None,
                  metrics_registry: MetricsRegistry = None,
-                 metrics_reporter: InfluxReporter = None,
                  ) -> None:
         self.logger = get_logger(self.__module__ + '.' + self.__class__.__name__)
 
@@ -140,11 +138,6 @@ class BasePeerPool(Service, AsyncIterable[BasePeer]):
             metrics_registry = MetricsRegistry()
         self._active_peer_counter = metrics_registry.counter('trinity.p2p/peers.counter')
         self._peer_reporter_registry = self.get_peer_reporter_registry(metrics_registry)
-        self._sync_metrics_registry = SyncMetricsRegistry(
-            metrics_registry,
-            metrics_reporter,
-            self._event_bus
-        )
 
         # Restricts the number of concurrent connection attempts can be made
         self._connection_attempt_lock = asyncio.BoundedSemaphore(MAX_CONCURRENT_CONNECTION_ATTEMPTS)
@@ -551,7 +544,6 @@ class BasePeerPool(Service, AsyncIterable[BasePeer]):
     async def _periodically_report_metrics(self) -> None:
         while self.manager.is_running:
             self._peer_reporter_registry.trigger_peer_reports()
-            self._sync_metrics_registry.trigger_sync_reports()
             await asyncio.sleep(self._report_metrics_interval)
 
     async def _periodically_report_stats(self) -> None:

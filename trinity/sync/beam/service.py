@@ -6,7 +6,7 @@ from lahja import BroadcastConfig, EndpointAPI
 from eth_typing import BlockNumber
 
 from eth.abc import AtomicDatabaseAPI
-from p2p.metrics import PivotEvent
+from trinity.components.builtin.metrics.sync_metrics_registry import PivotEvent
 
 from trinity.chains.base import AsyncChainAPI
 from trinity.db.eth1.chain import BaseAsyncChainDB
@@ -32,7 +32,8 @@ class BeamSyncService(Service):
             event_bus: EndpointAPI,
             checkpoint: Checkpoint = None,
             force_beam_block_number: BlockNumber = None,
-            enable_header_backfill: bool = False) -> None:
+            enable_header_backfill: bool = False,
+            metrics_enabled: bool = False) -> None:
         self.logger = get_logger('trinity.sync.beam.service.BeamSyncService')
         self.chain = chain
         self.chaindb = chaindb
@@ -42,6 +43,7 @@ class BeamSyncService(Service):
         self.checkpoint = checkpoint
         self.force_beam_block_number = force_beam_block_number
         self.enable_header_backfill = enable_header_backfill
+        self.metrics_enabled = metrics_enabled
 
     async def run(self) -> None:
         head = await self.chaindb.coro_get_canonical_head()
@@ -73,8 +75,12 @@ class BeamSyncService(Service):
             do_pivot = await self._monitor_for_pivot(beam_syncer)
             if do_pivot:
                 self.logger.info("Pivoting Beam Sync to a newer header...")
-                latest_block_number = beam_syncer._body_syncer._latest_block_number
-                await self.event_bus.broadcast(PivotEvent(latest_block_number), BroadcastConfig(internal=True))
+                if self.metrics_enabled:
+                    latest_block_number = beam_syncer._body_syncer._latest_block_number
+                    await self.event_bus.broadcast(
+                        PivotEvent(latest_block_number),
+                        BroadcastConfig(internal=True)
+                    )
             else:
                 self.logger.info("No pivot requested. Leaving Beam Syncer closed...")
                 break
