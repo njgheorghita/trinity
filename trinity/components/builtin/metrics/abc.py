@@ -1,7 +1,6 @@
 from abc import abstractmethod
 
 from async_service import ServiceAPI
-from lahja import EndpointAPI
 from pyformance import MetricsRegistry
 from pyformance.reporters import InfluxReporter
 
@@ -28,7 +27,4 @@ class MetricsServiceAPI(ServiceAPI):
     @property
     @abstractmethod
     def reporter(self) -> InfluxReporter:
-        ...
-
-    def subscribe_to_pivot_events(self, event_bus: EndpointAPI) -> None:
         ...

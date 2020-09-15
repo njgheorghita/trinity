@@ -30,12 +30,14 @@ from eth_utils import (
 
 from p2p.asyncio_utils import create_task, wait_first
 
+from trinity._utils.services import run_background_asyncio_services
 from trinity.boot_info import BootInfo
 from trinity.config import (
     Eth1AppConfig,
 )
 from trinity.components.builtin.metrics.component import metrics_service_from_args
 from trinity.components.builtin.metrics.service.asyncio import AsyncioMetricsService
+from trinity.components.builtin.metrics.sync_metrics_registry import SyncMetricsRegistry
 from trinity.components.builtin.metrics.service.noop import NOOP_METRICS_SERVICE
 from trinity.constants import (
     NETWORKING_EVENTBUS_ENDPOINT,
@@ -207,6 +209,15 @@ class BeamSyncStrategy(BaseSyncStrategy):
                    peer_pool: BasePeerPool,
                    event_bus: EndpointAPI) -> None:
 
+        sync_metrics_registry = None
+        metrics_service = None
+        if args.enable_metrics:
+            metrics_service = metrics_service_from_args(args, AsyncioMetricsService)
+            sync_metrics_registry = SyncMetricsRegistry(
+                metrics_service.registry,
+                metrics_service.reporter,
+            )
+
         syncer = BeamSyncService(
             chain,
             AsyncChainDB(base_db),
@@ -216,11 +227,11 @@ class BeamSyncStrategy(BaseSyncStrategy):
             args.sync_from_checkpoint,
             args.force_beam_block_number,
             not args.disable_backfill,
-            args.enable_metrics,
+            sync_metrics_registry,
         )
 
-        async with background_asyncio_service(syncer) as manager:
-            await manager.wait_finished()
+        services = (syncer, metrics_service,) if metrics_service else (syncer,)
+        await run_background_asyncio_services(services)
 
 
 class HeaderSyncStrategy(BaseSyncStrategy):
@@ -359,7 +370,6 @@ class SyncerComponent(AsyncioIsolatedComponent):
 
         if boot_info.args.enable_metrics:
             metrics_service = metrics_service_from_args(boot_info.args, AsyncioMetricsService)
-            metrics_service.subscribe_to_pivot_events(event_bus)
         else:
             # Use a NoopMetricsService so that no code branches need to be taken if metrics
             # are disabled
