@@ -76,7 +76,7 @@ class BeamSyncService(Service):
             if do_pivot:
                 self.logger.info("Pivoting Beam Sync to a newer header...")
                 if self.sync_metrics_registry:
-                    latest_block = BlockNumber(beam_syncer._body_syncer._latest_block_number)
+                    latest_block = beam_syncer._body_syncer._latest_block_number
                     await self.sync_metrics_registry.record_pivot(latest_block)
             else:
                 self.logger.info("No pivot requested. Leaving Beam Syncer closed...")

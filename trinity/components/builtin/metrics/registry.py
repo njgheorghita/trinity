@@ -46,7 +46,7 @@ class NoopMetricsRegistry(HostMetricsRegistry):
     """
 
     def __init__(self) -> None:
-        pass
+        self.host = None
 
     def dump_metrics(self) -> Dict[str, Dict[str, Any]]:
         pass
