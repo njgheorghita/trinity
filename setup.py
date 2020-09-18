@@ -31,6 +31,7 @@ deps = {
     ],
     'trinity': [
         "aiohttp==3.6.0",
+        "asks>=2.4.10,<3",
         "asyncio-run-in-process==0.1.0a8",
         "bloom-filter==1.3",
         "cachetools>=3.1.0,<4.0.0",

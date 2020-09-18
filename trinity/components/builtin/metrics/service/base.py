@@ -1,5 +1,6 @@
 import time
 import aiohttp
+import asks
 from typing import Dict
 import base64
 from abc import abstractmethod
@@ -27,14 +28,45 @@ class ExtendedInfluxReporter(InfluxReporter):
             f"db={self.database}&precision=s",  # query
             ''
         ))
-        auth_header = self._generate_auth_header()
-        async with aiohttp.ClientSession() as session:
-            await session.post(url, data=annotation_data, headers=auth_header)
+        await self._post(url, annotation_data)
 
     def _generate_auth_header(self) -> Dict[str, str]:
         auth_string = ("%s:%s" % (self.username, self.password)).encode()
         auth = base64.b64encode(auth_string)
         return {"Authorization": "Basic %s" % auth.decode("utf-8")}
+
+    async def _post(self, url, data):
+        # what if no auth_header / self.username?
+        # should we catch errors? copy strategy from other place in code
+        # auth_header = self._generate_auth_header()
+        # if auth_header:
+            # async with aiohttp.ClientSession() as session:
+                # await session.post(url, data=data, headers=auth_header)
+        # else:
+        # async with aiohttp.ClientSession() as session:
+        await asks.post(url, data=data)
+
+
+    # use instead of pyformance.reporters.InfluxReporter.report_now
+    async def report_async(self, registry=None, timestamp=None):
+        print("REPORT_ASYNC")
+        timestamp = timestamp or int(round(self.clock.time()))
+        metrics = (registry or self.registry).dump_metrics()
+        post_data = []
+        for key, metric_values in metrics.items():
+            if not self.prefix:
+                table = key
+            else:
+                table = "%s.%s" % (self.prefix, key)
+            values = ",".join(["%s=%s" % (k, v if type(v) is not str \
+                                               else '"{}"'.format(v))
+                              for (k, v) in metric_values.items()])
+            line = "%s %s %s" % (table, values, timestamp)
+            post_data.append(line)
+        post_data = "\n".join(post_data)
+        path = "/write?db=%s&precision=s" % self.database
+        url = "%s://%s:%s%s" % (self.protocol, self.server, self.port, path)
+        await self._post(url, post_data)
 
 
 class BaseMetricsService(Service, MetricsServiceAPI):
@@ -92,9 +124,10 @@ class BaseMetricsService(Service, MetricsServiceAPI):
         self.manager.run_daemon_task(self.continuously_report)
         await self.manager.wait_finished()
 
-    def report_now(self) -> None:
+    async def report_now(self) -> None:
         try:
-            self._reporter.report_now()
+            print("REPORT_NOW")
+            await self._reporter.report_async()
         except (HTTPException, ConnectionError) as exc:
 
             # This method is usually called every few seconds. If there's an issue with the
